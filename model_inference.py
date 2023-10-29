@@ -91,6 +91,9 @@ predicted_labels = []
 
 with torch.no_grad():
     for inputs, labels in valid_dataloader:
+        export_output = torch.onnx.dynamo_export(model, inputs)
+        export_output.save("cnn.onnx")
+        exit()
         outputs = model(inputs)
         
         _, predicted = torch.max(outputs, 1)
