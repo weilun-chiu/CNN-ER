@@ -85,84 +85,14 @@ class SpectrogramCNN(nn.Module):
         x = self.fc2(x)
         return x
 
-def quantize_to_int8(float32_tensor):
-    # Define min and max values for int8
-    min_int8 = -128  # int8 minimum value
-    max_int8 = 127   # int8 maximum value
-    scale = max_int8 - min_int8
-    
-    # Calculate min and max values in the input float32 tensor
-    float32_tensor = float32_tensor * scale
-    min_float32 = float32_tensor.min()
-    max_float32 = float32_tensor.max()
-    print(f'min={min_float32}, max={max_float32}')
-
-    # Scale and quantize the input float32 tensor
-    int8_tensor = ((float32_tensor - min_float32) / (max_float32 - min_float32)) * (max_int8 - min_int8) + min_int8
-    int8_tensor = int8_tensor.to(torch.int8)
-
-    print(f'input_dim = {float32_tensor.shape}  output_dim={int8_tensor.shape}')
-
-    return (int8_tensor, min_float32, max_float32)
-    
-def dequantize_to_float32(int8_tensor, min_float32, max_float32):
-    # Calculate the scale factor
-    scale_factor = (max_float32 - min_float32) / (int8_tensor.max().item() - int8_tensor.min().item())
-
-    # Dequantize the int8 tensor back to float32
-    float32_tensor = (int8_tensor - int8_tensor.min()) * scale_factor + min_float32
-    float32_tensor = float32_tensor.to(torch.float32)
-
-    return float32_tensor
-
-class QLinear(nn.Module):
-    def __init__(self, linear):
-        super(QLinear, self).__init__()
-        self.weight, self.weight_min, self.weight_max = quantize_to_int8(linear.weight)
-        self.bias, self.bias_min, self.bias_max = quantize_to_int8(linear.bias)
-
-    def forward(self, input):
-        # Implement the forward pass using int8 operations
-        weight = dequantize_to_float32(self.weight, self.weight_min, self.weight_max)
-        bias = dequantize_to_float32(self.bias, self.bias_min, self.bias_max)
-        output = torch.nn.functional.linear(input, weight, bias)
-        return output
-
-
-class QSpectrogramCNN(nn.Module):
-    def __init__(self, target):
-        super(QSpectrogramCNN, self).__init__()
-        self.conv1 = target.conv1
-        self.bn1 = target.bn1
-        self.conv2 = target.conv2
-        self.bn2 = target.bn2
-        self.conv3 = target.conv3
-        self.bn3 = target.bn3
-        self.pool = target.pool
-        self.fc1 = QLinear(target.fc1)
-        self.fc2 = QLinear(target.fc2)
-        self.relu = target.relu
-
-    def forward(self, x):
-        x = self.pool(self.relu(self.bn1(self.conv1(x))))
-        x = self.pool(self.relu(self.bn2(self.conv2(x))))
-        x = self.pool(self.relu(self.bn3(self.conv3(x))))
-        x = x.view(-1, 16 * 64 * 61)
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
-
 # load model
 model = SpectrogramCNN(num_classes=6)
 model.load_state_dict(torch.load('checkpoint/baseline_spectrogram_cnn_model.pth'))
 model.eval()
 
 qmodel = torch.quantization.quantize_dynamic(
-    model, {nn.Linear}, dtype=torch.qint8
+    model, {nn.Linear}, dtype=torch.float16
 )
-# QSpectrogramCNN(model)
-# torch.save(model.state_dict(), 'qmodel.pth')
-
 
 # validation script
 correct_predictions = 0
@@ -185,5 +115,5 @@ accuracy = correct_predictions / total_samples * 100
 print(f'Validation Accuracy: {accuracy:.2f}%')
 
 f=print_size_of_model(model,"fp32")
-q=print_size_of_model(qmodel,"int8")
+q=print_size_of_model(qmodel,"fp16")
 print("{0:.2f} times smaller".format(f/q))
