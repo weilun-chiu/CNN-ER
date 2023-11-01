@@ -150,6 +150,9 @@ def validation(input_model, AMP = False):
   print(f'Average Inference Latency: {np.mean(inference_latency_list)/64}')
   print(f'Average Inference Latency(b1): {np.mean(inference_latency_list_b1)}')
 
+validation(model)
+validation(model, AMP = True)
+
 if qint8_available:
     f=print_size_of_model(model,"fp32")
     q=print_size_of_model(qmodel,"qint8")
