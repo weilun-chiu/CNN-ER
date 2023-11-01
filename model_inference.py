@@ -2,10 +2,12 @@ import os
 import librosa
 import copy
 import numpy as np
-
+import time
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+
+qint8_available = False
 
 def print_size_of_model(model, label=""):
     torch.save(model.state_dict(), "temp.p")
@@ -56,8 +58,8 @@ class Speech_Dataset(Dataset):
         return np.expand_dims(spectrogram.astype(np.float32), axis=0) , label
 
 valid_dataset = Speech_Dataset(valid_dir, emotion2idx_dict, spectrogram_length)
-valid_dataloader = DataLoader(valid_dataset, batch_size=32)
-
+valid_dataloader = DataLoader(valid_dataset, batch_size=1)
+valid_dataloader32 = DataLoader(valid_dataset, batch_size=32)
 # three layers: baseline
 # Training Accuracy: 78.81%
 # Validation Accuracy: 50.11%
@@ -85,35 +87,70 @@ class SpectrogramCNN(nn.Module):
         x = self.fc2(x)
         return x
 
+## device has to be cuda to do AMP
+if torch.cuda.is_available():
+    device = "cuda"
+else:
+    raise Exception("No CUDA device found. This work must be run on CUDA device.")
+
 # load model
 model = SpectrogramCNN(num_classes=6)
 model.load_state_dict(torch.load('checkpoint/baseline_spectrogram_cnn_model.pth'))
-model.eval()
+model.eval().to(device)
 
-qmodel = torch.quantization.quantize_dynamic(
-    model, {nn.Linear}, dtype=torch.float16
-)
+if qint8_available:
+    qmodel = torch.quantization.quantize_dynamic(
+        model, {nn.Linear}, dtype=torch.qint8
+    )
 
-# validation script
-correct_predictions = 0
-total_samples = 0
-true_labels = []
-predicted_labels = []
+def validation(input_model, AMP = False):
+  correct_predictions = 0
+  total_samples = 0
+  inference_latency_list = []
+  inference_latency_list_b1 = []
+  with torch.no_grad():
+      
+      for inputs, labels in valid_dataloader:
+          inputs = inputs.to(device)
+          labels = labels.to(device)
+          i_start_time = time.time()
+          if AMP:
+            with torch.cuda.amp.autocast():
+              outputs = model(inputs)
+          else:
+            outputs = model(inputs)
+          _, predicted = torch.max(outputs, 1)
+          total_samples += labels.size(0)
+          correct_predictions += (predicted == labels).sum().item()
+          i_end_time = time.time()
+          inference_latency_list_b1 += [(i_end_time-i_start_time)/labels.size(0)] * labels.size(0)
 
-with torch.no_grad():
-    for inputs, labels in valid_dataloader:
-        outputs = qmodel(inputs)
-        
-        _, predicted = torch.max(outputs, 1)
-        total_samples += labels.size(0)
-        correct_predictions += (predicted == labels).sum().item()
 
-        true_labels.extend(labels.numpy())
-        predicted_labels.extend(predicted.numpy())
+      for inputs, labels in valid_dataloader32:
+          inputs = inputs.to(device)
+          labels = labels.to(device)
+          i_start_time = time.time()
+          if AMP:
+            with torch.cuda.amp.autocast():
+              outputs = model(inputs)
+          else:
+            outputs = model(inputs)
+          _, predicted = torch.max(outputs, 1)
+          total_samples += labels.size(0)
+          correct_predictions += (predicted == labels).sum().item()
+          i_end_time = time.time()
+          inference_latency_list += [(i_end_time-i_start_time)/labels.size(0)] * labels.size(0)
 
-accuracy = correct_predictions / total_samples * 100
-print(f'Validation Accuracy: {accuracy:.2f}%')
+  # Throw away first iteration
+  inference_latency_list = inference_latency_list[64:]
+  inference_latency_list_b1 = inference_latency_list_b1[1:]
 
-f=print_size_of_model(model,"fp32")
-q=print_size_of_model(qmodel,"fp16")
-print("{0:.2f} times smaller".format(f/q))
+  accuracy = correct_predictions / total_samples * 100
+  print(f'Validation Accuracy: {accuracy:.2f}%')
+  print(f'Average Inference Latency: {np.mean(inference_latency_list)/64}')
+  print(f'Average Inference Latency(b1): {np.mean(inference_latency_list_b1)}')
+
+if qint8_available:
+    f=print_size_of_model(model,"fp32")
+    q=print_size_of_model(qmodel,"qint8")
+    print("{0:.2f} times smaller".format(f/q))
